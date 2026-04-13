@@ -8,6 +8,7 @@ dependencies = [
     "folium>=0.20.0",
     "mercantile>=1.2.1",
     "osmnx>=2.1.0",
+    "pycountry>=26.2.16",
     "requests>=2.33.1",
     "streamlit>=1.56.0",
 ]
