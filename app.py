@@ -1,7 +1,9 @@
 import streamlit as st
 import requests
+
 # --- Configuration ---
 BASE_URL = st.secrets["APP_URL"]
+WEBHOOK_URL = st.secrets["N8N_WEBHOOK_EMAIL"]
 ST_TITLE = "📧 Outreach Email Reviewer"
 
 st.set_page_config(page_title=ST_TITLE, layout="wide")
@@ -29,7 +31,6 @@ def get_emails(run_id, status=None):
 def get_leads(run_id, page=1, limit=50):
     params = {"page": page, "limit": limit}
     try:
-        # Note: Using the specific /leads/ path provided by the user
         response = requests.get(f"{BASE_URL}/leads/runs/{run_id}", params=params)
         return response.json()
     except Exception as e:
@@ -37,7 +38,6 @@ def get_leads(run_id, page=1, limit=50):
         return None
 
 def update_email_status(email_id, action):
-    # action: 'approve' or 'decline'
     res = requests.post(f"{BASE_URL}/emails/{email_id}/{action}")
     return res.status_code == 200
 
@@ -46,12 +46,10 @@ def trigger_regeneration(run_id):
     return res.status_code == 200
 
 def update_run_status(run_id, action):
-    # action: 'approve' or 'decline'
     res = requests.post(f"{BASE_URL}/emails/runs/{run_id}/{action}")
     return res.status_code == 200
 
 def patch_email_data(email_id, patch_data):
-    """Partially update an email document."""
     try:
         res = requests.patch(f"{BASE_URL}/emails/{email_id}", json=patch_data)
         return res.status_code == 200
@@ -59,181 +57,311 @@ def patch_email_data(email_id, patch_data):
         st.error(f"Patch failed: {e}")
         return False
 
+def send_run(run_id):
+    try:
+        res = requests.post(WEBHOOK_URL, json={"run_id": run_id})
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Webhook failed: {e}")
+        return False
+
+
 # --- Sidebar ---
 st.sidebar.header("Campaign Management")
+
 runs = get_runs()
 
 if runs:
-    # Formatting run list for the dropdown
-    run_list = {f"{r['run_id'][:8]}... ({r['email_count']} emails)": r['run_id'] for r in runs}
-    selected_label = st.sidebar.selectbox("Select Campaign Run", options=list(run_list.keys()))
+    run_list = {
+        f"{r['run_id'][:8]}... ({r['email_count']} emails)": r['run_id']
+        for r in runs
+    }
+
+    selected_label = st.sidebar.selectbox(
+        "Select Campaign Run",
+        options=list(run_list.keys())
+    )
+
     current_run_id = run_list[selected_label]
 else:
     st.sidebar.warning("No runs detected.")
     current_run_id = None
 
 st.sidebar.divider()
-status_filter = st.sidebar.radio("Filter by Status", ["All", "Pending", "Approved", "Declined"])
+
+status_filter = st.sidebar.radio(
+    "Filter by Status",
+    ["All", "Pending", "Approved", "Declined"]
+)
+
 
 # --- Main Content ---
 st.title(ST_TITLE)
 
 if current_run_id:
-    # Action Bar
-    col_id, col_app, col_dec, col_reg, col_del = st.columns([3, 1.2, 1.2, 1.2, 1])
+
+    # --- Action Bar ---
+    col_id, col_app, col_dec, col_reg, col_send, col_del = st.columns(
+        [3, 1.2, 1.2, 1.2, 1.2, 1]
+    )
+
     with col_id:
         st.caption(f"Full Run ID: {current_run_id}")
+
     with col_app:
-        if st.button("✅ Approve All", type="primary", use_container_width=True, key="app_run"):
+        if st.button("✅ Approve All", use_container_width=True):
             if update_run_status(current_run_id, "approve"):
                 st.success("Entire run approved!")
                 st.rerun()
+
     with col_dec:
-        if st.button("❌ Decline All", type="secondary", use_container_width=True, key="dec_run"):
+        if st.button("❌ Decline All", use_container_width=True):
             if update_run_status(current_run_id, "decline"):
                 st.warning("Entire run declined!")
                 st.rerun()
+
     with col_reg:
-        if st.button("🔄 Regenerate", type="secondary", use_container_width=True, key="reg_run"):
+        if st.button("🔄 Regenerate", use_container_width=True):
             if trigger_regeneration(current_run_id):
                 st.success("Regeneration triggered!")
                 st.rerun()
+
+    with col_send:
+        if st.button("🚀 Send Run", use_container_width=True):
+            if send_run(current_run_id):
+                st.success("Run sent to email dispatcher!")
+            else:
+                st.error("Failed to trigger sending.")
+
     with col_del:
-        if st.button("🗑️ Delete Run", type="secondary", use_container_width=True, key="del_run"):
+        if st.button("🗑️ Delete Run", use_container_width=True):
             if requests.delete(f"{BASE_URL}/emails/runs/{current_run_id}").status_code == 200:
                 st.rerun()
 
-    # --- Main Tab Menu ---
-    main_tab_emails, main_tab_leads = st.tabs(["📧 Review Emails", "📊 Enriched Leads"])
+    # --- Tabs ---
+    main_tab_emails, main_tab_leads = st.tabs(
+        ["📧 Review Emails", "📊 Enriched Leads"]
+    )
 
+    # =========================
+    # EMAIL REVIEW TAB
+    # =========================
     with main_tab_emails:
-        # Data Fetching
+
         data = get_emails(current_run_id, status_filter)
-        
+
         if data and data.get("items"):
+
             st.write(f"Showing **{len(data['items'])}** generated emails")
-            
+
             for item in data["items"]:
+
                 with st.container(border=True):
-                    # Header info
-                    h_col1, h_col2 = st.columns([4, 1])
-                    with h_col1:
+
+                    email_status = item.get("email_status", {})
+
+                    def format_status(s):
+                        if not s:
+                            return "⚪ pending"
+                        
+                        status_text = s.get("status", "pending")
+                        sent_at = s.get("sent_at")
+                        if sent_at:
+                            date_part, time_part = sent_at.split('T')
+                            time_str = f" ({date_part} {time_part[:5]})"
+                        else:
+                            time_str = ""
+
+                        if status_text == "sent":
+                            return f"🟢 sent{time_str}"
+                        if status_text == "failed":
+                            return "🔴 failed"
+                        return "🟡 pending"
+
+                    # --- Header ---
+                    h1, h2, h3 = st.columns([4, 1, 2])
+
+                    with h1:
                         st.markdown(f"🏢 {item.get('title', 'Unknown Lead')}")
-                        st.caption(f"ID: {item['_id']} | Email: {item.get('lead_email')}")
-                    with h_col2:
-                        status = item.get('approval_status', 'pending').upper()
+                        st.caption(
+                            f"ID: {item['_id']} | Email: {item.get('lead_email')}"
+                        )
+
+                    with h2:
+                        status = item.get("approval_status", "pending").upper()
                         color = "green" if status == "APPROVED" else "red" if status == "DECLINED" else "orange"
                         st.markdown(f":{color}[**{status}**]")
 
-                    # Content Tabs
-                    tab1, tab2, tab3 = st.tabs(["Main Email", "Follow-ups", "Metadata"])
-                    
+                    with h3:
+                        st.caption(
+                            f"""
+Main: {format_status(email_status.get("main"))}  
+F1: {format_status(email_status.get("follow_up_1"))}  
+F2: {format_status(email_status.get("follow_up_2"))}  
+F3: {format_status(email_status.get("follow_up_3"))}
+"""
+                        )
+
+                    # --- Content Tabs ---
+                    tab1, tab2, tab3 = st.tabs(
+                        ["Main Email", "Follow-ups", "Metadata"]
+                    )
+
                     gen_data = item.get("generated_emails", {})
-                    
+
+                    # MAIN EMAIL (MODIFIED FOR HTML EDITING)
                     with tab1:
-                        # Subject Lines
-                        subjects = gen_data.get("subject_lines", ["No subject generated"])
-                        selected_subject = st.selectbox("Suggested Subject Lines", subjects, key=f"sub_{item['_id']}")
-                        
-                        # Email Body Toggle
-                        mode = st.radio("View Mode", ["Preview", "Edit Plain Text"], key=f"mode_{item['_id']}", horizontal=True)
-                        if mode == "Preview":
-                            st.divider()
-                            st.components.v1.html(gen_data.get("main_email_html", ""), height=300, scrolling=True)
-                            new_body = gen_data.get("main_email_plain", "")
+                        new_subject = st.text_input(
+                            "Subject Line",
+                            gen_data.get("main_email_subject", ""),
+                            key=f"sub_{item['_id']}"
+                        )
+
+                        mode = st.radio(
+                            "View Mode",
+                            ["Preview Render", "Edit HTML Source"],
+                            key=f"mode_{item['_id']}",
+                            horizontal=True
+                        )
+
+                        if mode == "Preview Render":
+                            st.caption("Current HTML Preview:")
+                            st.components.v1.html(
+                                gen_data.get("main_email_html", ""),
+                                height=400,
+                                scrolling=True
+                            )
+                            new_html_body = gen_data.get("main_email_html", "")
                         else:
-                            new_body = st.text_area("Body (Plain Text)", gen_data.get("main_email_plain", ""), height=300, key=f"edit_body_{item['_id']}")
+                            new_html_body = st.text_area(
+                                "HTML Source",
+                                gen_data.get("main_email_html", ""),
+                                height=400,
+                                key=f"edit_html_{item['_id']}"
+                            )
 
+                    # FOLLOW UPS
                     with tab2:
-                        col_f1, col_f2, col_f3 = st.columns(3)
-                        with col_f1:
-                            st.caption("Follow-up 1")
-                            f1_text = st.text_area("F1", gen_data.get("follow_up_1", ""), height=200, label_visibility="collapsed", key=f"f1_{item['_id']}")
-                        with col_f2:
-                            st.caption("Follow-up 2")
-                            f2_text = st.text_area("F2", gen_data.get("follow_up_2", ""), height=200, label_visibility="collapsed", key=f"f2_{item['_id']}")
-                        with col_f3:
-                            st.caption("Follow-up 3")
-                            f3_text = st.text_area("F3", gen_data.get("follow_up_3", ""), height=200, label_visibility="collapsed", key=f"f3_{item['_id']}")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.caption(f"F1 Subject: {gen_data.get('follow_up_1_subject', 'N/A')}")
+                            f1_text = st.text_area(
+                                "F1",
+                                gen_data.get("follow_up_1_body", ""),
+                                height=200,
+                                label_visibility="collapsed",
+                                key=f"f1_{item['_id']}"
+                            )
 
+                        with col2:
+                            st.caption(f"F2 Subject: {gen_data.get('follow_up_2_subject', 'N/A')}")
+                            f2_text = st.text_area(
+                                "F2",
+                                gen_data.get("follow_up_2_body", ""),
+                                height=200,
+                                label_visibility="collapsed",
+                                key=f"f2_{item['_id']}"
+                            )
+
+                        with col3:
+                            st.caption(f"F3 Subject: {gen_data.get('follow_up_3_subject', 'N/A')}")
+                            f3_text = st.text_area(
+                                "F3",
+                                gen_data.get("follow_up_3_body", ""),
+                                height=200,
+                                label_visibility="collapsed",
+                                key=f"f3_{item['_id']}"
+                            )
+
+                    # METADATA
                     with tab3:
                         metadata = item.get("metadata", {})
                         st.json({
                             "Place ID": item.get("place_id"),
                             "Website": metadata.get("website"),
                             "Category": metadata.get("category"),
-                            "Created At": item.get("created_at")
+                            "Created At": item.get("created_at"),
+                            "Sent At (Status Detail)": {
+                                "Main": email_status.get("main", {}).get("sent_at"),
+                                "F1": email_status.get("follow_up_1", {}).get("sent_at"),
+                                "F2": email_status.get("follow_up_2", {}).get("sent_at"),
+                                "F3": email_status.get("follow_up_3", {}).get("sent_at"),
+                            }
                         })
 
-                    # Footer Actions
-                    act_col1, act_col2, act_col3, act_col4, _ = st.columns([1, 1, 1, 1, 3])
-                    with act_col1:
+                    # --- Actions ---
+                    c1, c2, c3, c4, _ = st.columns([1, 1, 1, 1, 3])
+
+                    with c1:
                         if st.button("✅ Approve", key=f"btn_app_{item['_id']}"):
-                            if update_email_status(item['_id'], "approve"):
-                                st.toast(f"Approved {item.get('title')}")
+                            if update_email_status(item["_id"], "approve"):
+                                st.toast("Approved")
                                 st.rerun()
-                    with act_col2:
+
+                    with c2:
                         if st.button("❌ Decline", key=f"btn_dec_{item['_id']}"):
-                            if update_email_status(item['_id'], "decline"):
-                                st.toast(f"Declined {item.get('title')}")
+                            if update_email_status(item["_id"], "decline"):
+                                st.toast("Declined")
                                 st.rerun()
-                    with act_col3:
+
+                    with c3:
                         if st.button("💾 Save", key=f"btn_save_{item['_id']}"):
                             patch_data = {
                                 "generated_emails": {
                                     **gen_data,
-                                    "main_email_plain": new_body,
-                                    "follow_up_1": f1_text,
-                                    "follow_up_2": f2_text,
-                                    "follow_up_3": f3_text
+                                    "main_email_subject": new_subject,
+                                    "main_email_html": new_html_body,
+                                    "follow_up_1_body": f1_text,
+                                    "follow_up_2_body": f2_text,
+                                    "follow_up_3_body": f3_text,
                                 }
                             }
-                            if patch_email_data(item['_id'], patch_data):
-                                st.toast("Changes saved successfully!")
+                            if patch_email_data(item["_id"], patch_data):
+                                st.toast("Saved Changes!")
                                 st.rerun()
-                    with act_col4:
+
+                    with c4:
                         if st.button("🗑️", key=f"btn_del_{item['_id']}"):
                             requests.delete(f"{BASE_URL}/emails/{item['_id']}")
                             st.rerun()
         else:
-            st.info("No emails found for the selected criteria.")
+            st.info("No emails found.")
 
+    # =========================
+    # LEADS TAB
+    # =========================
     with main_tab_leads:
         leads_data = get_leads(current_run_id)
         if leads_data and leads_data.get("items"):
-            st.write(f"Showing **{len(leads_data['items'])}** enriched leads from PostgreSQL")
-            
-            # Simple Stat Row
+            st.write(f"Showing **{len(leads_data['items'])}** enriched leads")
             s1, s2, s3 = st.columns(3)
             s1.metric("Total Leads", leads_data.get("total", 0))
             s2.metric("Page", leads_data.get("page", 1))
             s3.metric("Limit", leads_data.get("limit", 50))
-            
             st.divider()
-
             for lead in leads_data["items"]:
-                with st.expander(f"📍 {lead['title']} - {lead.get('category', 'Restaurant')}"):
-                    l_col1, l_col2 = st.columns(2)
-                    with l_col1:
-                        st.markdown(f"**Website:** {lead.get('website', 'N/A')}")
-                        st.markdown(f"**Email:** {lead.get('email', 'N/A')}")
-                        st.markdown(f"**WhatsApp:** {lead.get('whatsapp_number', 'N/A')}")
-                        st.markdown(f"**Address:** `{lead.get('address', 'N/A')}`")
-                    with l_col2:
-                        st.markdown(f"**Review Count:** {lead.get('review_count', 0)}")
-                        st.markdown(f"**Review Rating:** ⭐ {lead.get('review_rating', 0)}")
-                        st.markdown(f"**SEO Score:** {lead.get('seo_score', 0)}")
-                        st.markdown(f"**Conversion Score:** {lead.get('conversion_score', 0)}")
-                    
+                with st.expander(f"📍 {lead['title']} - {lead.get('category','Business')}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**Website:** {lead.get('website')}")
+                        st.markdown(f"**Email:** {lead.get('email')}")
+                        st.markdown(f"**WhatsApp:** {lead.get('whatsapp_number')}")
+                        st.markdown(f"**Address:** `{lead.get('address')}`")
+                    with col2:
+                        st.markdown(f"**Review Count:** {lead.get('review_count',0)}")
+                        st.markdown(f"**Review Rating:** ⭐ {lead.get('review_rating',0)}")
+                        st.markdown(f"**SEO Score:** {lead.get('seo_score',0)}")
+                        st.markdown(f"**Conversion Score:** {lead.get('conversion_score',0)}")
                     st.divider()
                     st.json({
                         "id": lead.get("id"),
                         "place_id": lead.get("place_id"),
                         "tech_stack": lead.get("tech_stack"),
                         "identified_problems": lead.get("identified_problems"),
-                        "additional_phone_numbers": lead.get("additional_phone_numbers")
+                        "additional_phone_numbers": lead.get("additional_phone_numbers"),
                     })
         else:
-            st.info("No lead data found for this run ID.")
+            st.info("No lead data found.")
+
 else:
-    st.info("Select a Run ID from the sidebar to begin reviewing.")
+    st.info("Select a Run ID from the sidebar.")
