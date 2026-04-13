@@ -10,6 +10,18 @@ ITEMS_PER_PAGE = 20
 st.set_page_config(page_title=ST_TITLE, layout="wide")
 
 # --- API Interaction Layer ---
+
+def trigger_job_creation(payload):
+    """Triggers the /create-jobs endpoint (New API Integration)"""
+    try:
+        # Replacing /outreach with /tiles to match your router logic
+        TILES_URL = BASE_URL.replace('/outreach', '/tiles')
+        res = requests.post(f"{TILES_URL}/create-jobs", json=payload)
+        return res
+    except Exception as e:
+        st.error(f"API Connection Error: {e}")
+        return None
+
 def get_sync_status(run_id):
     """Fetches background synchronization progress for a specific run."""
     try:
@@ -205,10 +217,8 @@ if nav_page == "📧 Email Campaigns":
     st.title(ST_TITLE)
 
     if current_run_id:
-        # 1. Sync Banner (NEW)
         render_sync_banner(current_run_id)
 
-        # 2. Action Bar
         col_app, col_dec, col_reg, col_send, col_del = st.columns([1, 1, 1, 1, 1])
         with col_app: 
             if st.button("✅ Approve All", use_container_width=True): 
@@ -280,7 +290,6 @@ if nav_page == "📧 Email Campaigns":
                         with tab3:
                             st.json(item)
 
-                        # Row Actions
                         c1, c2, c3, c4, _ = st.columns([1, 1, 1, 1, 4])
                         if c1.button("✅ Approve", key=f"a_{item['_id']}"):
                             if update_email_status(item["_id"], "approve"): st.rerun()
@@ -305,37 +314,91 @@ else:
     if "active_lead_run" in st.session_state:
         render_leads_view(st.session_state.active_lead_run)
     else:
-        st.title("📂 Collection Pipeline Tracking")
-        if "coll_page" not in st.session_state:
-            st.session_state.coll_page = 1
-
-        runs_data = get_all_runs(page=st.session_state.coll_page)
-        total_runs = runs_data.get("total", 0)
+        st.title("📂 Collection Management")
         
-        if not runs_data.get("items"):
-            st.info("No pipeline data found.")
-        else:
-            st.session_state.coll_page = render_pagination("coll", st.session_state.coll_page, total_runs)
+        tab_list, tab_create = st.tabs(["📋 View All Collections", "🆕 Start New Collection"])
 
-            for r in runs_data["items"]:
-                run_id = r.get("run_id")
-                sync = get_sync_status(run_id) # Integration of new API here
+        with tab_create:
+            st.subheader("Trigger New Lead Scraper Job")
+            with st.form("create_job_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    campaign_name = st.text_input("Campaign Name", placeholder="Dublin_Dentists_Q2")
+                    city = st.text_input("City", placeholder="Dublin")
+                    keywords = st.text_area("Keywords (one per line)", placeholder="Dentist\nDental Clinic")
+                with col2:
+                    zoom = st.number_input("Zoom Level", value=15)
+                    radius = st.number_input("Radius (meters)", value=500)
+                    max_time = st.number_input("Max Time (mins)", value=60)
                 
-                with st.container(border=True):
-                    col1, col2, col3 = st.columns([3, 2, 1])
-                    with col1:
-                        st.markdown(f"### 🚀 {r.get('campaign_name', 'Unnamed Collection')}")
-                        st.caption(f"ID: `{run_id}`")
-                    with col2:
-                        if sync:
-                            synced = sync.get("synced_job_ids_count", 0)
-                            total = sync.get("job_ids_count", 0)
-                            st.write(f"**Sync Progress:** {synced}/{total}")
-                            st.progress(synced / total if total > 0 else 0)
-                        else:
-                            st.write(f"**Status:** {r.get('status', 'unknown').upper()}")
-                    with col3:
-                        if st.button("Browse Leads", key=f"btn_v_leads_{run_id}", use_container_width=True):
-                            st.session_state.active_lead_run = run_id
-                            st.session_state.lead_page = 1
-                            st.rerun()
+                with st.expander("Advanced Configuration"):
+                    ca, cb = st.columns(2)
+                    step = ca.number_input("Step", value=3)
+                    depth = cb.number_input("Depth", value=10)
+                    email_scraping = st.toggle("Enable Email Scraping", value=True)
+                    fast_mode = st.toggle("Fast Mode", value=True)
+                    proxies = st.text_area("Proxies (Optional, one per line)")
+
+                submit = st.form_submit_button("🚀 Start Collection", use_container_width=True)
+
+                if submit:
+                    if not campaign_name or not city or not keywords:
+                        st.error("Campaign Name, City, and Keywords are required.")
+                    else:
+                        payload = {
+                            "city": city,
+                            "keywords": [k.strip() for k in keywords.split("\n") if k.strip()],
+                            "campaign_name": campaign_name,
+                            "zoom": int(zoom),
+                            "step": int(step),
+                            "radius": int(radius),
+                            "depth": int(depth),
+                            "email": email_scraping,
+                            "fast_mode": fast_mode,
+                            "max_time": int(max_time),
+                            "proxies": [p.strip() for p in proxies.split("\n") if p.strip()]
+                        }
+                        
+                        with st.spinner("Initializing Pipeline..."):
+                            response = trigger_job_creation(payload)
+                            if response and response.status_code == 200:
+                                st.success(f"Job successfully created! Run ID: {response.json().get('run_id')}")
+                                st.rerun()
+                            else:
+                                err = response.json().get('detail') if response else "Unknown Connection Error"
+                                st.error(f"Failed to start job: {err}")
+
+        with tab_list:
+            if "coll_page" not in st.session_state:
+                st.session_state.coll_page = 1
+
+            runs_data = get_all_runs(page=st.session_state.coll_page)
+            total_runs = runs_data.get("total", 0)
+            
+            if not runs_data.get("items"):
+                st.info("No pipeline data found.")
+            else:
+                st.session_state.coll_page = render_pagination("coll", st.session_state.coll_page, total_runs)
+
+                for r in runs_data["items"]:
+                    run_id = r.get("run_id")
+                    sync = get_sync_status(run_id)
+                    
+                    with st.container(border=True):
+                        col1, col2, col3 = st.columns([3, 2, 1])
+                        with col1:
+                            st.markdown(f"### 🚀 {r.get('campaign_name', 'Unnamed Collection')}")
+                            st.caption(f"ID: `{run_id}`")
+                        with col2:
+                            if sync:
+                                synced = sync.get("synced_job_ids_count", 0)
+                                total = sync.get("job_ids_count", 0)
+                                st.write(f"**Sync Progress:** {synced}/{total}")
+                                st.progress(synced / total if total > 0 else 0)
+                            else:
+                                st.write(f"**Status:** {r.get('status', 'unknown').upper()}")
+                        with col3:
+                            if st.button("Browse Leads", key=f"btn_v_leads_{run_id}", use_container_width=True):
+                                st.session_state.active_lead_run = run_id
+                                st.session_state.lead_page = 1
+                                st.rerun()
