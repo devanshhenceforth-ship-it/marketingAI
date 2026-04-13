@@ -366,8 +366,8 @@ else:
                     else:
                         payload = {
                             "city": city,
-                            "country": country_name,
-                            "country_code": country_iso, # Optional: pass ISO if backend supports it
+                            "country": country_iso.lower(),
+                            # "country_code": country_iso, # Optional: pass ISO if backend supports it
                             "keywords": [k.strip() for k in keywords.split("\n") if k.strip()],
                             "campaign_name": campaign_name,
                             "zoom": int(zoom),
