@@ -17,13 +17,18 @@ COUNTRY_LIST = sorted(
 
 # --- API Interaction Layer ---
 
+def get_headers():
+    if "access_token" in st.session_state:
+        return {"Authorization": f"Bearer {st.session_state['access_token']}"}
+    return {}
+
 def trigger_job_creation(payload):
     """Triggers the /create-jobs endpoint (New API Integration)"""
     try:
         # Replacing /outreach with /tiles to match your router logic
         TILES_URL = BASE_URL.replace('/outreach', '/tiles')
         print("TILES_URL", TILES_URL, payload)
-        res = requests.post(f"{TILES_URL}/create-jobs", json=payload)
+        res = requests.post(f"{TILES_URL}/create-jobs", json=payload, headers=get_headers())
         return res
     except Exception as e:
         st.error(f"API Connection Error: {e}")
@@ -32,7 +37,7 @@ def trigger_job_creation(payload):
 def get_sync_status(run_id):
     """Fetches background synchronization progress for a specific run."""
     try:
-        response = requests.get(f"{BASE_URL}/sync-status/{run_id}")
+        response = requests.get(f"{BASE_URL}/sync-status/{run_id}", headers=get_headers())
         if response.status_code == 200:
             return response.json().get("data", {})
         return None
@@ -43,7 +48,7 @@ def get_all_runs(page=1):
     try:
         TILES_URL = BASE_URL.replace('/outreach', '/tiles')
         params = {"page": page, "limit": ITEMS_PER_PAGE}
-        response = requests.get(f"{TILES_URL}/runs", params=params)
+        response = requests.get(f"{TILES_URL}/runs", params=params, headers=get_headers())
         data = response.json()
         if isinstance(data, list):
             return {"items": data, "total": len(data)}
@@ -54,7 +59,7 @@ def get_all_runs(page=1):
 
 def get_runs():
     try:
-        response = requests.get(f"{BASE_URL}/emails/runs")
+        response = requests.get(f"{BASE_URL}/emails/runs", headers=get_headers())
         return response.json().get("runs", [])
     except Exception as e:
         st.error(f"Failed to fetch outreach runs: {e}")
@@ -65,7 +70,7 @@ def get_emails(run_id, status=None, page=1):
     if status and status != "All":
         params["approval_status"] = status.lower()
     try:
-        response = requests.get(f"{BASE_URL}/emails/runs/{run_id}", params=params)
+        response = requests.get(f"{BASE_URL}/emails/runs/{run_id}", params=params, headers=get_headers())
         return response.json()
     except Exception as e:
         st.error(f"Failed to fetch emails: {e}")
@@ -74,24 +79,24 @@ def get_emails(run_id, status=None, page=1):
 def get_leads(run_id, page=1, limit=ITEMS_PER_PAGE):
     params = {"page": page, "limit": limit}
     try:
-        response = requests.get(f"{BASE_URL}/leads/runs/{run_id}", params=params)
+        response = requests.get(f"{BASE_URL}/leads/runs/{run_id}", params=params, headers=get_headers())
         return response.json()
     except Exception as e:
         st.error(f"Failed to fetch leads: {e}")
         return None
 
 def update_email_status(email_id, action):
-    return requests.post(f"{BASE_URL}/emails/{email_id}/{action}").status_code == 200
+    return requests.post(f"{BASE_URL}/emails/{email_id}/{action}", headers=get_headers()).status_code == 200
 
 def trigger_regeneration(run_id):
-    return requests.post(f"{BASE_URL}/emails/runs/{run_id}/regenerate").status_code == 200
+    return requests.post(f"{BASE_URL}/emails/runs/{run_id}/regenerate", headers=get_headers()).status_code == 200
 
 def update_run_status(run_id, action):
-    return requests.post(f"{BASE_URL}/emails/runs/{run_id}/{action}").status_code == 200
+    return requests.post(f"{BASE_URL}/emails/runs/{run_id}/{action}", headers=get_headers()).status_code == 200
 
 def patch_email_data(email_id, patch_data):
     try:
-        res = requests.patch(f"{BASE_URL}/emails/{email_id}", json=patch_data)
+        res = requests.patch(f"{BASE_URL}/emails/{email_id}", json=patch_data, headers=get_headers())
         return res.status_code == 200
     except Exception as e:
         st.error(f"Patch failed: {e}")
@@ -185,6 +190,36 @@ def render_leads_view(run_id):
     else:
         st.info("No lead data found.")
 
+# --- Authentication & Login Flow ---
+if "access_token" not in st.session_state:
+    st.title("🔒 Login Required")
+    with st.container(border=True):
+        st.subheader("Please sign in to continue")
+        with st.form("login_form"):
+            username = st.text_input("Username", value="omji@henceforth.com")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login", use_container_width=True)
+            if submit:
+                # Based on the user instruction making a form data request
+                payload = {
+                    "username": username,
+                    "password": password,
+                    "grant_type": "password"
+                }
+                AUTH_URL = BASE_URL.replace('/outreach', '/auth/login')
+                try:
+                    res = requests.post(AUTH_URL, data=payload)
+                    if res.status_code == 200:
+                        data = res.json()
+                        st.session_state["access_token"] = data.get("access_token")
+                        st.success("Logged in successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Login failed. Please check your credentials.")
+                except Exception as e:
+                    st.error(f"Login request failed: {e}")
+    st.stop()  # Stop execution of the rest of the app until logged in
+
 # --- Sidebar Navigation ---
 st.sidebar.title("🚀 Navigation")
 nav_page = st.sidebar.radio("Select View", ["📧 Email Campaigns", "📂 Lead Collections"])
@@ -241,7 +276,7 @@ if nav_page == "📧 Email Campaigns":
                 if send_run(current_run_id): st.success("Run sent!")
         with col_del: 
             if st.button("🗑️ Delete", type="primary", use_container_width=True): 
-                if requests.delete(f"{BASE_URL}/emails/runs/{current_run_id}").status_code == 200: st.rerun()
+                if requests.delete(f"{BASE_URL}/emails/runs/{current_run_id}", headers=get_headers()).status_code == 200: st.rerun()
         
         st.caption(f"Full Run ID: `{current_run_id}`")
 
@@ -306,7 +341,7 @@ if nav_page == "📧 Email Campaigns":
                             patch_data = {"generated_emails": {**gen_data, "main_email_subject": new_subject, "main_email_html": new_html_body, "follow_up_1_body": f1_text, "follow_up_2_body": f2_text}}
                             if patch_email_data(item["_id"], patch_data): st.toast("Saved Changes!")
                         if c4.button("🗑️", key=f"del_{item['_id']}", type="secondary"):
-                            requests.delete(f"{BASE_URL}/emails/{item['_id']}")
+                            requests.delete(f"{BASE_URL}/emails/{item['_id']}", headers=get_headers())
                             st.rerun()
             else:
                 st.info("No emails matching the current filter.")
