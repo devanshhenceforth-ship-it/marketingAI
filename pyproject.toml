@@ -11,4 +11,5 @@ dependencies = [
     "pycountry>=26.2.16",
     "requests>=2.33.1",
     "streamlit>=1.56.0",
+    "streamlit-ace>=0.1.1",
 ]

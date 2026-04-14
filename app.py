@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pycountry
-
 # --- Configuration ---
 BASE_URL = st.secrets["APP_URL"]
 WEBHOOK_URL = st.secrets["N8N_WEBHOOK_EMAIL"]
@@ -109,6 +108,54 @@ def send_run(run_id):
     except Exception as e:
         st.error(f"Webhook failed: {e}")
         return False
+
+# --- Prompt Management Variables ---
+SYSTEM_VARIABLES = ["$category", "$address", "$rag_context"]
+USER_VARIABLES = ["$title", "$website", "$business_type", "$tech_stack", "$identified_problems", "$recommended_actions"]
+
+def prompt_editor(label, value="", height=250, key="editor", variables=None):
+    st.markdown(f"**{label}**")
+    if variables:
+        st.caption(f"Available variables: `{', '.join(variables)}`")
+    
+    return st.text_area(label, value=value, height=height, key=key, label_visibility="collapsed")
+
+
+def get_prompts():
+    try:
+        res = requests.get(f"{BASE_URL}/prompts", headers=get_headers())
+        if res.status_code == 200:
+            return res.json()
+        return {"items": [], "total": 0}
+    except Exception as e:
+        st.error(f"Failed to fetch prompts: {e}")
+        return {"items": [], "total": 0}
+
+def upsert_prompt(payload):
+    try:
+        res = requests.post(f"{BASE_URL}/prompts", json=payload, headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Failed to save prompt: {e}")
+        return False
+
+def delete_prompt(prompt_id):
+    try:
+        res = requests.delete(f"{BASE_URL}/prompts/{prompt_id}", headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Failed to delete prompt: {e}")
+        return False
+
+def get_resolved_prompt(run_id):
+    try:
+        res = requests.get(f"{BASE_URL}/resolved-prompt/{run_id}", headers=get_headers())
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        st.error(f"Failed to resolve prompt: {e}")
+        return None
 
 # --- UI Helpers ---
 
@@ -222,7 +269,7 @@ if "access_token" not in st.session_state:
 
 # --- Sidebar Navigation ---
 st.sidebar.title("🚀 Navigation")
-nav_page = st.sidebar.radio("Select View", ["📧 Email Campaigns", "📂 Lead Collections"])
+nav_page = st.sidebar.radio("Select View", ["📧 Email Campaigns", "📂 Lead Collections", "🎯 Prompt Management"])
 
 if "last_nav" not in st.session_state or st.session_state.last_nav != nav_page:
     st.session_state.email_page = 1
@@ -279,6 +326,31 @@ if nav_page == "📧 Email Campaigns":
                 if requests.delete(f"{BASE_URL}/emails/runs/{current_run_id}", headers=get_headers()).status_code == 200: st.rerun()
         
         st.caption(f"Full Run ID: `{current_run_id}`")
+
+        # --- Quick Prompt Configuration ---
+        with st.expander("🎯 Campaign Prompt Settings"):
+            st.info("Customize variables for this specific campaign run.")
+            resolved = get_resolved_prompt(current_run_id)
+            if resolved:
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_sys = prompt_editor("System Instruction", value=resolved.get("system_instruction", ""), height=250, key=f"camp_sys_{current_run_id}", variables=SYSTEM_VARIABLES)
+                with c2:
+                    new_user = prompt_editor("User Instruction", value=resolved.get("user_instruction", ""), height=250, key=f"camp_user_{current_run_id}", variables=USER_VARIABLES)
+                
+                new_rag = st.text_area("RAG Context", value=resolved.get("rag_context", ""), height=100, key=f"camp_rag_{current_run_id}")
+                
+                if st.button("💾 Save Campaign Prompts", use_container_width=True, type="primary"):
+                    p_payload = {
+                        "run_id": current_run_id,
+                        "system_instruction": new_sys,
+                        "user_instruction": new_user,
+                        "rag_context": new_rag,
+                        "is_universal": False
+                    }
+                    if upsert_prompt(p_payload):
+                        st.success("Campaign prompts updated!")
+                        st.rerun()
 
         main_tab_emails, main_tab_leads = st.tabs(["📧 Review Emails", "📊 Enriched Leads"])
 
@@ -352,7 +424,7 @@ if nav_page == "📧 Email Campaigns":
 # =========================================================
 # PAGE: LEAD COLLECTIONS (OPTIMIZED)
 # =========================================================
-else:
+elif nav_page == "📂 Lead Collections":
     if "active_lead_run" in st.session_state:
         render_leads_view(st.session_state.active_lead_run)
     else:
@@ -457,3 +529,136 @@ else:
                                 st.session_state.active_lead_run = run_id
                                 st.session_state.lead_page = 1
                                 st.rerun()
+
+# =========================================================
+# PAGE: PROMPT MANAGEMENT
+# =========================================================
+
+
+# =========================================================
+# PAGE: PROMPT MANAGEMENT
+# =========================================================
+else:
+    st.title("🎯 Prompt Management")
+    st.caption("Manage AI templates used to generate outreach emails.")
+
+    tab_list, tab_upsert = st.tabs(["📋 View Prompts", "🆕 Create / Update Prompt"])
+
+    # -----------------------------
+    # VIEW PROMPTS
+    # -----------------------------
+    with tab_list:
+
+        prompts_data = get_prompts()
+
+        if not prompts_data.get("items"):
+            st.info("No prompts created yet.")
+        else:
+            for p in prompts_data["items"]:
+
+                with st.container(border=True):
+
+                    c1, c2 = st.columns([4, 1])
+
+                    with c1:
+                        scope = "Universal" if p.get("is_universal") else f"Run: {p.get('run_id')}"
+                        st.markdown(f"### {scope}")
+                        st.caption(f"Updated: {p.get('updated_at')}")
+
+                    with c2:
+                        if st.button("🗑 Delete", key=f"del_{p.get('_id')}"):
+                            if delete_prompt(p.get("_id")):
+                                st.rerun()
+
+                    with st.expander("Edit Prompt"):
+
+                        e_sys = prompt_editor(
+                            "System Instruction",
+                            value=p.get("system_instruction", ""),
+                            key=f"edit_sys_{p.get('_id')}",
+                            height=220,
+                            variables=SYSTEM_VARIABLES
+                        )
+
+                        e_user = prompt_editor(
+                            "User Instruction",
+                            value=p.get("user_instruction", ""),
+                            key=f"edit_user_{p.get('_id')}",
+                            height=200,
+                            variables=USER_VARIABLES
+                        )
+
+                        e_rag = prompt_editor(
+                            "RAG Context",
+                            value=p.get("rag_context", ""),
+                            key=f"edit_rag_{p.get('_id')}",
+                            height=150
+                        )
+
+                        if st.button("💾 Save Changes", key=f"save_{p.get('_id')}", use_container_width=True):
+
+                            payload = {
+                                "run_id": p.get("run_id"),
+                                "system_instruction": e_sys,
+                                "user_instruction": e_user,
+                                "rag_context": e_rag,
+                                "is_universal": p.get("is_universal", False)
+                            }
+
+                            if upsert_prompt(payload):
+                                st.success("Prompt updated")
+                                st.rerun()
+
+    # -----------------------------
+    # CREATE PROMPT
+    # -----------------------------
+    with tab_upsert:
+
+        st.subheader("Create New Prompt")
+
+        template = st.selectbox("Load Template", ["None"])
+
+        u_run_id = st.text_input("Run ID (Optional)")
+
+        u_sys = prompt_editor(
+            "System Instruction",
+            value=st.session_state.get("system_prompt_create", ""),
+            key="system_prompt_create",
+            height=260,
+            variables=SYSTEM_VARIABLES
+        )
+
+        u_user = prompt_editor(
+            "User Instruction",
+            value="",
+            key="user_prompt_create",
+            height=200,
+            variables=USER_VARIABLES
+        )
+
+        u_rag = prompt_editor(
+            "RAG Context",
+            value="",
+            key="rag_prompt_create",
+            height=150
+        )
+
+        u_universal = st.checkbox("Universal Prompt")
+
+        if st.button("💾 Save Prompt", use_container_width=True):
+
+            if not u_sys:
+                st.error("System prompt required")
+            else:
+
+                payload = {
+                    "run_id": u_run_id if u_run_id else None,
+                    "system_instruction": u_sys,
+                    "user_instruction": u_user,
+                    "rag_context": u_rag,
+                    "is_universal": u_universal
+                }
+
+                if upsert_prompt(payload):
+                    st.success("Prompt saved")
+                    st.rerun()
