@@ -109,6 +109,28 @@ def send_run(run_id):
         st.error(f"Webhook failed: {e}")
         return False
 
+def get_lead_stats(run_id):
+    """Fetches counts (generated, failed, processing) for a specific run."""
+    try:
+        response = requests.get(f"{BASE_URL}/leads/runs/{run_id}/stats", headers=get_headers())
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        st.error(f"Failed to fetch stats: {e}")
+        return None
+
+def update_lead_run_status(run_id, status: str):
+    """Updates the overall status of a lead run (e.g., 'completed', 'archived')."""
+    try:
+        TILES_URL = BASE_URL.replace('/outreach', '/tiles')
+        payload = {"status": status}
+        res = requests.post(f"{TILES_URL}/runs/{run_id}/status", json=payload, headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Failed to update run status: {e}")
+        return False
+
 # --- Prompt Management Variables ---
 SYSTEM_VARIABLES = ["$category", "$address", "$rag_context"]
 USER_VARIABLES = ["$title", "$website", "$business_type", "$tech_stack", "$identified_problems", "$recommended_actions"]
@@ -202,38 +224,168 @@ def render_leads_view(run_id):
     if "lead_page" not in st.session_state:
         st.session_state.lead_page = 1
 
-    if st.button("⬅️ Back to List", key=f"back_leads_{run_id}"):
-        if "active_lead_run" in st.session_state:
-            del st.session_state.active_lead_run
-        st.session_state.lead_page = 1
-        st.rerun()
-    
-    st.title(f"📊 Enriched Leads")
+    # --- Header Navigation & Global Actions ---
+    col_nav, col_controls = st.columns([2, 2])
+
+    with col_nav:
+        if st.button("⬅️ Back to List", key=f"back_leads_{run_id}"):
+            if "active_lead_run" in st.session_state:
+                del st.session_state.active_lead_run
+            st.session_state.lead_page = 1
+            st.rerun()
+
+    with col_controls:
+        pipe_col, prompt_col = st.columns(2)
+
+        # -------------------------
+        # PIPELINE CONTROL
+        # -------------------------
+        with pipe_col:
+            with st.popover("🚀 Control Pipeline", use_container_width=True):
+                st.markdown("### Email Generation Command")
+
+                command = st.radio(
+                    "Select Action:",
+                    options=["approved", "pending"],
+                    format_func=lambda x: "✅ Approve & Start Generation" if x == "approved" else "⏳ Wait / Hold",
+                )
+
+                btn_label = "🚀 Start Generation" if command == "approved" else "🛑 Set to Wait"
+
+                if st.button(btn_label, use_container_width=True, type="primary"):
+                    if update_lead_run_status(run_id, command):
+                        if command == "approved":
+                            st.toast(f"Run {run_id} approved! Generation starting...", icon="🚀")
+                        else:
+                            st.toast(f"Run {run_id} set to wait.", icon="🛑")
+                        st.rerun()
+                    else:
+                        st.error("Failed to update pipeline status.")
+
+        # -------------------------
+        # PROMPT EDITOR
+        # -------------------------
+        with prompt_col:
+            with st.popover("🎯 Edit Generation Prompt", use_container_width=True):
+
+                resolved = get_resolved_prompt(run_id)
+
+                if resolved:
+
+                    new_sys = prompt_editor(
+                        "System Instruction",
+                        value=resolved.get("system_instruction", ""),
+                        height=220,
+                        key=f"lead_sys_{run_id}",
+                        variables=SYSTEM_VARIABLES
+                    )
+
+                    new_user = prompt_editor(
+                        "User Instruction",
+                        value=resolved.get("user_instruction", ""),
+                        height=200,
+                        key=f"lead_user_{run_id}",
+                        variables=USER_VARIABLES
+                    )
+
+                    new_rag = st.text_area(
+                        "RAG Context",
+                        value=resolved.get("rag_context", ""),
+                        height=120,
+                        key=f"lead_rag_{run_id}"
+                    )
+
+                    if st.button("💾 Save Prompt", use_container_width=True):
+
+                        payload = {
+                            "run_id": run_id,
+                            "system_instruction": new_sys,
+                            "user_instruction": new_user,
+                            "rag_context": new_rag,
+                            "is_universal": False
+                        }
+
+                        if upsert_prompt(payload):
+                            st.success("Prompt updated successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to update prompt.")
+
+                else:
+                    st.warning("No prompt configured yet for this run.")
+
+    st.title("📊 Enriched Leads")
+
+    # --- Stats Section ---
+    stats = get_lead_stats(run_id)
+    if stats:
+        with st.container(border=True):
+            cols = st.columns(5)
+            cols[0].metric("Total Leads", stats.get("total", 0))
+            cols[1].metric("Generated Emails", stats.get("generated", 0))
+            cols[2].metric("Processing", stats.get("processing", 0))
+            cols[3].metric("Pending", stats.get("pending", 0))
+            cols[4].metric("Failed", stats.get("failed", 0), delta_color="inverse")
+
     st.caption(f"Run ID: {run_id}")
-    
+
+    # -------------------------
+    # LEADS TABLE
+    # -------------------------
     leads_data = get_leads(run_id, page=st.session_state.lead_page)
+
     if leads_data and leads_data.get("items"):
-        new_page = render_pagination("leads", st.session_state.lead_page, leads_data.get("total", 0))
+
+        new_page = render_pagination(
+            "leads",
+            st.session_state.lead_page,
+            leads_data.get("total", 0)
+        )
+
         if new_page != st.session_state.lead_page:
             st.session_state.lead_page = new_page
             st.rerun()
 
         st.divider()
+
         for lead in leads_data["items"]:
+
             with st.container(border=True):
-                col1, col2 = st.columns([2, 1])
-                with col1:
+
+                header_col, status_col = st.columns([3, 1])
+
+                with header_col:
                     st.markdown(f"#### 📍 {lead.get('title', 'Unknown')}")
+
+                with status_col:
+
+                    if lead.get("is_email_generated"):
+                        st.success("✉️ Email Generated")
+
+                    elif lead.get("email_generation_status") == "processing":
+                        st.warning("⏳ Processing")
+
+                    elif lead.get("email_generation_status") == "failed":
+                        st.error("❌ Failed")
+
+                    else:
+                        st.info("🌑 Pending Email Generation")
+
+                col1, col2 = st.columns([2, 1])
+
+                with col1:
                     st.caption(f"Category: {lead.get('category','Business')}")
                     st.markdown(f"**Website:** {lead.get('website')}")
                     st.markdown(f"**Email:** {lead.get('email')}")
                     st.markdown(f"**Address:** `{lead.get('address')}`")
+
                 with col2:
-                    st.metric("SEO Score", lead.get('seo_score',0))
-                    st.metric("Rating", f"⭐ {lead.get('review_rating',0)}")
-                
+                    st.metric("SEO Score", lead.get('seo_score', 0))
+                    st.metric("Rating", f"⭐ {lead.get('review_rating', 0)}")
+
                 with st.expander("View Raw JSON Data"):
                     st.json(lead)
+
     else:
         st.info("No lead data found.")
 
@@ -534,84 +686,11 @@ elif nav_page == "📂 Lead Collections":
 # PAGE: PROMPT MANAGEMENT
 # =========================================================
 
-
-# =========================================================
-# PAGE: PROMPT MANAGEMENT
-# =========================================================
 else:
     st.title("🎯 Prompt Management")
     st.caption("Manage AI templates used to generate outreach emails.")
 
-    tab_list, tab_upsert = st.tabs(["📋 View Prompts", "🆕 Create / Update Prompt"])
-
-    # -----------------------------
-    # VIEW PROMPTS
-    # -----------------------------
-    with tab_list:
-
-        prompts_data = get_prompts()
-
-        if not prompts_data.get("items"):
-            st.info("No prompts created yet.")
-        else:
-            for p in prompts_data["items"]:
-
-                with st.container(border=True):
-
-                    c1, c2 = st.columns([4, 1])
-
-                    with c1:
-                        scope = "Universal" if p.get("is_universal") else f"Run: {p.get('run_id')}"
-                        st.markdown(f"### {scope}")
-                        st.caption(f"Updated: {p.get('updated_at')}")
-
-                    with c2:
-                        if st.button("🗑 Delete", key=f"del_{p.get('_id')}"):
-                            if delete_prompt(p.get("_id")):
-                                st.rerun()
-
-                    with st.expander("Edit Prompt"):
-
-                        e_sys = prompt_editor(
-                            "System Instruction",
-                            value=p.get("system_instruction", ""),
-                            key=f"edit_sys_{p.get('_id')}",
-                            height=220,
-                            variables=SYSTEM_VARIABLES
-                        )
-
-                        e_user = prompt_editor(
-                            "User Instruction",
-                            value=p.get("user_instruction", ""),
-                            key=f"edit_user_{p.get('_id')}",
-                            height=200,
-                            variables=USER_VARIABLES
-                        )
-
-                        e_rag = prompt_editor(
-                            "RAG Context",
-                            value=p.get("rag_context", ""),
-                            key=f"edit_rag_{p.get('_id')}",
-                            height=150
-                        )
-
-                        if st.button("💾 Save Changes", key=f"save_{p.get('_id')}", use_container_width=True):
-
-                            payload = {
-                                "run_id": p.get("run_id"),
-                                "system_instruction": e_sys,
-                                "user_instruction": e_user,
-                                "rag_context": e_rag,
-                                "is_universal": p.get("is_universal", False)
-                            }
-
-                            if upsert_prompt(payload):
-                                st.success("Prompt updated")
-                                st.rerun()
-
-    # -----------------------------
-    # CREATE PROMPT
-    # -----------------------------
+    tab_upsert, = st.tabs(["🆕 Create / Update Prompt"])
     with tab_upsert:
 
         st.subheader("Create New Prompt")
