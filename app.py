@@ -4,6 +4,7 @@ import pycountry
 # --- Configuration ---
 BASE_URL = st.secrets["APP_URL"]
 WEBHOOK_URL = st.secrets["N8N_WEBHOOK_EMAIL"]
+WOODPECKER_URL = BASE_URL.replace('/outreach', '/woodpecker')
 ST_TITLE = "📧 Outreach Email Reviewer"
 ITEMS_PER_PAGE = 20
 
@@ -130,6 +131,49 @@ def update_lead_run_status(run_id, status: str):
     except Exception as e:
         st.error(f"Failed to update run status: {e}")
         return False
+
+# --- Woodpecker API Integration ---
+def sync_woodpecker(run_id):
+    try:
+        res = requests.post(f"{BASE_URL}/emails/runs/{run_id}/sync-woodpecker", headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Failed to sync woodpecker: {e}")
+        return False
+
+def get_woodpecker_mailboxes(force_sync=False):
+    try:
+        res = requests.get(f"{WOODPECKER_URL}/mailboxes", params={"force_sync": force_sync}, headers=get_headers())
+        return res.json() if res.status_code == 200 else []
+    except Exception as e:
+        st.error(f"Woodpecker Mailboxes Error: {e}")
+        return []
+
+def get_woodpecker_campaigns(force_sync=False):
+    try:
+        res = requests.get(f"{WOODPECKER_URL}/campaigns", params={"force_sync": force_sync}, headers=get_headers())
+        return res.json() if res.status_code == 200 else []
+    except Exception as e:
+        st.error(f"Woodpecker Campaigns Error: {e}")
+        return []
+
+def create_woodpecker_campaign(payload):
+    try:
+        res = requests.post(f"{WOODPECKER_URL}/campaigns", json=payload, headers=get_headers())
+        return res.status_code in [200, 201]
+    except Exception as e:
+        st.error(f"Woodpecker Create Campaign Error: {e}")
+        return False
+
+def sync_woodpecker_all():
+    try:
+        res = requests.post(f"{WOODPECKER_URL}/sync", headers=get_headers())
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        st.error(f"Woodpecker Sync Error: {e}")
+        return None
 
 # --- Prompt Management Variables ---
 SYSTEM_VARIABLES = ["$category", "$address", "$rag_context"]
@@ -421,7 +465,7 @@ if "access_token" not in st.session_state:
 
 # --- Sidebar Navigation ---
 st.sidebar.title("🚀 Navigation")
-nav_page = st.sidebar.radio("Select View", ["📧 Email Campaigns", "📂 Lead Collections", "🎯 Prompt Management"])
+nav_page = st.sidebar.radio("Select View", ["📧 Email Campaigns", "📂 Lead Collections", "🎯 Prompt Management", "🦜 Woodpecker Management"])
 
 if "last_nav" not in st.session_state or st.session_state.last_nav != nav_page:
     st.session_state.email_page = 1
@@ -460,7 +504,7 @@ if nav_page == "📧 Email Campaigns":
     if current_run_id:
         render_sync_banner(current_run_id)
 
-        col_app, col_dec, col_reg, col_send, col_del = st.columns([1, 1, 1, 1, 1])
+        col_app, col_dec, col_reg, col_send, col_woodpecker, col_del = st.columns([1, 1, 1, 1, 1, 1])
         with col_app: 
             if st.button("✅ Approve All", use_container_width=True): 
                 if update_run_status(current_run_id, "approve"): st.rerun()
@@ -473,6 +517,9 @@ if nav_page == "📧 Email Campaigns":
         with col_send: 
             if st.button("🚀 Push to n8n", use_container_width=True): 
                 if send_run(current_run_id): st.success("Run sent!")
+        with col_woodpecker:
+            if st.button("🦜 Sync Woodpecker", use_container_width=True):
+                if sync_woodpecker(current_run_id): st.success("Woodpecker sync initiated!")
         with col_del: 
             if st.button("🗑️ Delete", type="primary", use_container_width=True): 
                 if requests.delete(f"{BASE_URL}/emails/runs/{current_run_id}", headers=get_headers()).status_code == 200: st.rerun()
@@ -686,7 +733,7 @@ elif nav_page == "📂 Lead Collections":
 # PAGE: PROMPT MANAGEMENT
 # =========================================================
 
-else:
+elif nav_page == "🎯 Prompt Management":
     st.title("🎯 Prompt Management")
     st.caption("Manage AI templates used to generate outreach emails.")
 
@@ -741,3 +788,112 @@ else:
                 if upsert_prompt(payload):
                     st.success("Prompt saved")
                     st.rerun()
+
+# =========================================================
+# PAGE: WOODPECKER MANAGEMENT
+# =========================================================
+elif nav_page == "🦜 Woodpecker Management":
+    st.title("🦜 Woodpecker Management")
+    st.caption("Manage your Woodpecker mailboxes, campaigns, and sync status.")
+
+    tab_mailboxes, tab_campaigns, tab_sync = st.tabs(["📬 Mailboxes", "📣 Campaigns", "🔄 Sync"])
+
+    # ──────────────────────────────────────────────
+    # TAB: Mailboxes
+    # ──────────────────────────────────────────────
+    with tab_mailboxes:
+        col_hdr, col_refresh = st.columns([4, 1])
+        with col_hdr:
+            st.subheader("Connected Mailboxes")
+        with col_refresh:
+            force_sync_mb = st.button("🔄 Force Sync", key="wp_mb_sync", use_container_width=True)
+
+        mailboxes = get_woodpecker_mailboxes(force_sync=force_sync_mb)
+
+        if mailboxes:
+            for mb in mailboxes:
+                details = mb.get("details", {})
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.markdown(f"**📧 {details.get('email', 'Unknown')}**")
+                        st.caption(f"ID: `{mb.get('id', 'N/A')}` | Provider: {details.get('provider', 'N/A')}")
+                    with c2:
+                        status = mb.get("status", "unknown")
+                        color = "green" if status == "active" else "orange"
+                        st.markdown(f":{color}[**{status.upper()}**]")
+                        st.caption(f"Limit: {details.get('daily_limit', 0)}/day")
+        else:
+            st.info("No mailboxes found. Click 'Force Sync' to pull from Woodpecker.")
+
+    # ──────────────────────────────────────────────
+    # TAB: Campaigns
+    # ──────────────────────────────────────────────
+    with tab_campaigns:
+        col_hdr2, col_refresh2 = st.columns([4, 1])
+        with col_hdr2:
+            st.subheader("Woodpecker Campaigns")
+        with col_refresh2:
+            force_sync_cp = st.button("🔄 Force Sync", key="wp_cp_sync", use_container_width=True)
+
+        campaigns = get_woodpecker_campaigns(force_sync=force_sync_cp)
+
+        if campaigns:
+            for cp in campaigns:
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    with c1:
+                        st.markdown(f"### 📣 {cp.get('name', 'Unnamed Campaign')}")
+                        st.caption(f"ID: `{cp.get('id', 'N/A')}`")
+                    with c2:
+                        status = cp.get("status", "unknown")
+                        color = "green" if status in ["running", "active", "RUNNING"] else "orange" if status in ["draft", "DRAFT"] else "red"
+                        st.markdown(f":{color}[**{status.upper()}**]")
+                    with c3:
+                        per_day = cp.get("per_day", 0)
+                        st.metric("Per Day", per_day)
+                    with st.expander("View Raw Data"):
+                        st.json(cp)
+        else:
+            st.info("No campaigns found. Click 'Force Sync' to pull from Woodpecker.")
+
+        st.divider()
+        st.subheader("Create New Campaign")
+        
+        mailboxes_for_campaign = get_woodpecker_mailboxes(force_sync=False)
+        mailbox_options = {f"{m.get('details', {}).get('email')} (ID: {m.get('id')})": m.get("id") for m in mailboxes_for_campaign if m.get("id")}
+        
+        with st.form("wp_create_campaign_form"):
+            cp_name = st.text_input("Campaign Name", placeholder="Q2 Outreach - Dentists")
+            selected_mailboxes = st.multiselect("Select Delivery Mailboxes", options=list(mailbox_options.keys()))
+            cp_submit = st.form_submit_button("🚀 Create Campaign", use_container_width=True)
+            
+            if cp_submit:
+                if not cp_name or not selected_mailboxes:
+                    st.error("Campaign name and at least one mailbox are required.")
+                else:
+                    payload = {
+                        "name": cp_name,
+                        "email_account_ids": [mailbox_options[k] for k in selected_mailboxes]
+                    }
+                    if create_woodpecker_campaign(payload):
+                        st.success(f"Campaign '{cp_name}' created successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to create campaign.")
+
+    # ──────────────────────────────────────────────
+    # TAB: Full Sync
+    # ──────────────────────────────────────────────
+    with tab_sync:
+        st.subheader("Full Resync")
+        st.info("Trigger a full resync of all mailboxes and campaigns from Woodpecker.")
+        if st.button("🔄 Sync Everything", use_container_width=True, type="primary"):
+            with st.spinner("Syncing with Woodpecker..."):
+                sync_result = sync_woodpecker_all()
+                if sync_result and sync_result.get("success"):
+                    st.success(f"Sync complete! Retrieved {sync_result.get('mailboxes_synced', 0)} mailboxes and {sync_result.get('campaigns_synced', 0)} campaigns.")
+                    st.rerun()
+                else:
+                    err_msg = sync_result.get("message", "Unknown error") if sync_result else "Please try again."
+                    st.error(f"Sync failed: {err_msg}")
