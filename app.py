@@ -3,7 +3,6 @@ import requests
 import pycountry
 # --- Configuration ---
 BASE_URL = st.secrets["APP_URL"]
-WEBHOOK_URL = st.secrets["N8N_WEBHOOK_EMAIL"]
 WOODPECKER_URL = BASE_URL.replace('/outreach', '/woodpecker')
 ST_TITLE = "📧 Outreach Email Reviewer"
 ITEMS_PER_PAGE = 20
@@ -102,14 +101,6 @@ def patch_email_data(email_id, patch_data):
         st.error(f"Patch failed: {e}")
         return False
 
-def send_run(run_id):
-    try:
-        res = requests.post(WEBHOOK_URL, json={"run_id": run_id})
-        return res.status_code == 200
-    except Exception as e:
-        st.error(f"Webhook failed: {e}")
-        return False
-
 def get_lead_stats(run_id):
     """Fetches counts (generated, failed, processing) for a specific run."""
     try:
@@ -163,6 +154,22 @@ def create_woodpecker_campaign(payload):
         return res.status_code in [200, 201]
     except Exception as e:
         st.error(f"Woodpecker Create Campaign Error: {e}")
+        return False
+
+def run_woodpecker_campaign(campaign_id):
+    try:
+        res = requests.post(f"{WOODPECKER_URL}/campaigns/{campaign_id}/run", headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Woodpecker Run Campaign Error: {e}")
+        return False
+
+def update_woodpecker_campaign(campaign_id, payload):
+    try:
+        res = requests.patch(f"{WOODPECKER_URL}/campaigns/{campaign_id}", json=payload, headers=get_headers())
+        return res.status_code == 200
+    except Exception as e:
+        st.error(f"Woodpecker Update Campaign Error: {e}")
         return False
 
 def sync_woodpecker_all():
@@ -504,7 +511,7 @@ if nav_page == "📧 Email Campaigns":
     if current_run_id:
         render_sync_banner(current_run_id)
 
-        col_app, col_dec, col_reg, col_send, col_woodpecker, col_del = st.columns([1, 1, 1, 1, 1, 1])
+        col_app, col_dec, col_reg, col_woodpecker, col_del = st.columns([1, 1, 1, 1, 1])
         with col_app: 
             if st.button("✅ Approve All", use_container_width=True): 
                 if update_run_status(current_run_id, "approve"): st.rerun()
@@ -514,9 +521,6 @@ if nav_page == "📧 Email Campaigns":
         with col_reg: 
             if st.button("🔄 Regenerate", use_container_width=True): 
                 if trigger_regeneration(current_run_id): st.rerun()
-        with col_send: 
-            if st.button("🚀 Push to n8n", use_container_width=True): 
-                if send_run(current_run_id): st.success("Run sent!")
         with col_woodpecker:
             if st.button("🦜 Sync Woodpecker", use_container_width=True):
                 if sync_woodpecker(current_run_id): st.success("Woodpecker sync initiated!")
@@ -841,7 +845,7 @@ elif nav_page == "🦜 Woodpecker Management":
         if campaigns:
             for cp in campaigns:
                 with st.container(border=True):
-                    c1, c2, c3 = st.columns([3, 1, 1])
+                    c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
                     with c1:
                         st.markdown(f"### 📣 {cp.get('name', 'Unnamed Campaign')}")
                         st.caption(f"ID: `{cp.get('id', 'N/A')}`")
@@ -852,7 +856,41 @@ elif nav_page == "🦜 Woodpecker Management":
                     with c3:
                         per_day = cp.get("per_day", 0)
                         st.metric("Per Day", per_day)
-                    with st.expander("View Raw Data"):
+                    with c4:
+                        if status in ["draft", "DRAFT", "paused", "PAUSED", "STOPPED", "stopped"]:
+                            if st.button("🚀 Start Campaign", key=f"run_cp_{cp.get('id')}", use_container_width=True):
+                                if run_woodpecker_campaign(cp.get("id")):
+                                    st.success("Campaign Started!")
+                                    st.rerun()
+                                else:
+                                    st.error("Could not start campaign.")
+                    with st.expander("⚙️ Settings & Raw Data"):
+                        st.write("**Update Settings**")
+                        # Default timezone or pull from campaign config if present
+                        with st.form(f"update_camp_{cp.get('id')}"):
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                new_daily_enroll = st.number_input("Daily Enroll Limit", value=int(per_day) if per_day else 40, min_value=1, step=1)
+                            with col_b:
+                                new_tz = st.text_input("Timezone", value="Europe/Warsaw")
+                                
+                            has_prospect_tz = st.checkbox("Match Prospect Timezone", value=True)
+                            
+                            if st.form_submit_button("Save Campaign Settings", use_container_width=True):
+                                update_payload = {
+                                    "settings": {
+                                        "daily_enroll": int(new_daily_enroll),
+                                        "timezone": new_tz,
+                                        "prospect_timezone": has_prospect_tz
+                                    }
+                                }
+                                if update_woodpecker_campaign(cp.get("id"), update_payload):
+                                    st.success("Settings updated!")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to update.")
+                        st.divider()
+                        st.write("**Raw JSON Data**")
                         st.json(cp)
         else:
             st.info("No campaigns found. Click 'Force Sync' to pull from Woodpecker.")
