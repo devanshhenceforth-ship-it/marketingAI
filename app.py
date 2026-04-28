@@ -857,13 +857,13 @@ elif nav_page == "🦜 Woodpecker Management":
                         per_day = cp.get("per_day", 0)
                         st.metric("Per Day", per_day)
                     with c4:
-                        if status in ["draft", "DRAFT", "paused", "PAUSED", "STOPPED", "stopped"]:
-                            if st.button("🚀 Start Campaign", key=f"run_cp_{cp.get('id')}", use_container_width=True):
-                                if run_woodpecker_campaign(cp.get("id")):
-                                    st.success("Campaign Started!")
-                                    st.rerun()
-                                else:
-                                    st.error("Could not start campaign.")
+                        # if status in ["draft", "DRAFT", "paused", "PAUSED", "STOPPED", "stopped"]:
+                        if st.button("🚀 Start Campaign", key=f"run_cp_{cp.get('id')}", use_container_width=True):
+                            if run_woodpecker_campaign(cp.get("id")):
+                                st.success("Campaign Started!")
+                                st.rerun()
+                            else:
+                                st.error("Could not start campaign.")
                     with st.expander("⚙️ Settings & Raw Data"):
                         st.write("**Update Settings**")
                         # Default timezone or pull from campaign config if present
